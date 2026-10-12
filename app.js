@@ -872,9 +872,25 @@
     const btn = e.target.closest('.ctrl');
     if (btn) runAction(btn.dataset.action);
   });
-  // Don't let control buttons keep focus, so shortcut keys keep working cleanly
+  // Don't let control buttons take focus, and move focus out of any text box,
+  // so shortcut keys work straight after clicking a control
+  function releaseTextFocus() {
+    if (isTypingTarget(document.activeElement)) document.activeElement.blur();
+  }
   $('#controls').addEventListener('mousedown', (e) => {
-    if (e.target.closest('.ctrl')) e.preventDefault();
+    if (!e.target.closest('.ctrl')) return;
+    e.preventDefault();
+    releaseTextFocus();
+  });
+  progress.addEventListener('pointerdown', releaseTextFocus);
+  waveCanvas.addEventListener('pointerdown', releaseTextFocus);
+
+  // Shortcuts are ignored while typing; say so, and let Esc get out of the box
+  const typingHint = $('#typingHint');
+  document.addEventListener('focusin', () => { typingHint.hidden = !isTypingTarget(document.activeElement); });
+  document.addEventListener('focusout', () => { setTimeout(() => { typingHint.hidden = !isTypingTarget(document.activeElement); }); });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && isTypingTarget(e.target)) e.target.blur();
   });
 
   function applySettings() {

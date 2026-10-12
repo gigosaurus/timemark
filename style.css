@@ -207,6 +207,14 @@ video { display: block; width: 100%; max-height: 62vh; background: #000; }
 .ctrl.active { background: var(--accent-soft); border-color: var(--accent); }
 .ctrl.flash { background: color-mix(in srgb, var(--mark) 30%, var(--surface)); transition: none; }
 
+.typing-hint {
+  margin: 0;
+  padding: 6px 10px;
+  border-radius: 8px;
+  font-size: 14px;
+  background: var(--accent-soft);
+  color: var(--text);
+}
 .settings { display: flex; flex-wrap: wrap; gap: 8px 20px; align-items: center; color: var(--muted); font-size: 14px; }
 .settings label { display: inline-flex; align-items: center; gap: 6px; }
 input[type="number"], select, textarea {

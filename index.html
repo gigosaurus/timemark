@@ -75,6 +75,8 @@
           </button>
         </div>
 
+        <p id="typingHint" class="typing-hint" hidden>Shortcuts are paused while you’re typing. Press <kbd>Esc</kbd> or click a control to use them.</p>
+
         <div class="settings">
           <label>Skip
             <input id="skipInput" type="number" min="0.1" max="600" step="0.5" value="3"> s
@@ -124,7 +126,7 @@
 
         <details class="drawer" id="labelDrawer">
           <summary>Auto-label from text <span class="muted">(e.g. lyrics)</span></summary>
-          <p class="muted small">Paste text here and each new mark takes the next word (or line) as its label.</p>
+          <p class="muted small">Paste text here and each new mark takes the next word (or line) as its label. Press <kbd>Esc</kbd> when you’re done typing so the shortcut keys work again.</p>
           <textarea id="labelText" rows="5" placeholder="Paste lyrics or a list of scene names…"></textarea>
           <div class="row">
             <label>Split by
