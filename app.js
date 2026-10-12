@@ -18,6 +18,8 @@
   };
   const REPEATABLE = new Set(['back', 'forward']);
   const PEAKS_PER_SEC = 400;
+  // MP3s up to this size are decoded up front so seeking is exact (see loadFile)
+  const MP3_DECODE_LIMIT = 20 * 1024 * 1024;
   const STORE_PREFIX = 'timemark:';
 
   // ---------------------------------------------------------------------------
@@ -46,6 +48,8 @@
   const state = {
     file: null,
     objectUrl: null,
+    playbackUrl: null,  // decoded copy of the file, when we make one
+    preparing: false,
     isAudio: false,
     marks: [],          // { id, time, label } sorted by time
     addStack: [],       // ids in the order they were added (for undo)
@@ -154,6 +158,10 @@
       /\.(mp3|wav|ogg|oga|flac|m4a|aac|opus|weba|mp4|m4v|webm|mov|mkv|ogv)$/i.test(file.name);
   }
 
+  function isMp3(file) {
+    return /^audio\/(mpeg|mp3)$/.test(file.type) || /\.mp3$/i.test(file.name);
+  }
+
   function loadFile(file) {
     if (!file) return;
     if (!looksLikeMedia(file)) {
@@ -164,10 +172,14 @@
     flushSave();
     const token = ++state.loadToken;
     media.pause();
+    media.removeAttribute('src');
+    media.load();
     if (state.objectUrl) URL.revokeObjectURL(state.objectUrl);
+    if (state.playbackUrl) URL.revokeObjectURL(state.playbackUrl);
 
     state.file = file;
     state.objectUrl = URL.createObjectURL(file);
+    state.playbackUrl = null;
     state.peaks = null;
     state.marks = [];
     state.addStack = [];
@@ -189,24 +201,34 @@
     stage.classList.remove('is-audio', 'is-video');
     waveWrap.hidden = true;
     $('#zoomLabel').hidden = true;
+    durTimeEl.textContent = formatTime(0);
 
-    media.src = state.objectUrl;
+    renderMarks();
+    if (state.marks.length) toast(`Restored ${state.marks.length} saved timestamp${state.marks.length === 1 ? '' : 's'}`);
+
+    // Browsers seek MP3s by estimating byte offsets, which for VBR files without a
+    // seek table lands audibly in the wrong place. Decoding up front and playing an
+    // uncompressed copy makes every seek exact.
+    if (isMp3(file) && file.size <= MP3_DECODE_LIMIT) prepareDecodedAudio(file, token);
+    else {
+      attachSource(state.objectUrl, token);
+      if (isMp3(file)) toast('Large MP3: skips may land slightly off. WAV, OGG or M4A give exact timing.');
+    }
+  }
+
+  function attachSource(url, token) {
+    const file = state.file;
+    media.src = url;
     media.playbackRate = state.settings.speed;
     media.volume = state.settings.volume;
 
     media.addEventListener('loadedmetadata', function onMeta() {
       if (token !== state.loadToken) return;
       const isAudio = !media.videoWidth || /^audio\//.test(file.type);
-      state.isAudio = isAudio;
-      stage.classList.add(isAudio ? 'is-audio' : 'is-video');
-      waveWrap.hidden = !isAudio;
-      $('#zoomLabel').hidden = !isAudio;
+      showStage(isAudio);
       durTimeEl.textContent = formatTime(duration());
       renderMarks();
-      if (isAudio) {
-        resizeCanvas();
-        buildPeaks(file, token);
-      }
+      if (isAudio && !state.peaks) buildPeaks(file, token);
       media.playbackRate = state.settings.speed; // some browsers reset this on load
       updatePlayState();
     }, { once: true });
@@ -215,59 +237,119 @@
       if (token !== state.loadToken) return;
       toast('Your browser can’t play this file format');
     }, { once: true });
+  }
 
-    renderMarks();
-    if (state.marks.length) toast(`Restored ${state.marks.length} saved timestamp${state.marks.length === 1 ? '' : 's'}`);
+  function showStage(isAudio) {
+    state.isAudio = isAudio;
+    stage.classList.remove('is-audio', 'is-video');
+    stage.classList.add(isAudio ? 'is-audio' : 'is-video');
+    waveWrap.hidden = !isAudio;
+    $('#zoomLabel').hidden = !isAudio;
+    if (isAudio) resizeCanvas();
+  }
+
+  async function prepareDecodedAudio(file, token) {
+    state.preparing = true;
+    showStage(true);
+    waveStatus.textContent = 'Preparing audio…';
+    let url = state.objectUrl;
+    try {
+      const buffer = await decodeFile(file, 44100);
+      if (token !== state.loadToken) return;
+      state.peaks = computePeaks(buffer);
+      state.playbackUrl = URL.createObjectURL(encodeWav(buffer));
+      url = state.playbackUrl;
+      waveStatus.textContent = '';
+    } catch (err) {
+      if (token !== state.loadToken) return;
+      console.warn('MP3 decode failed; falling back to direct playback', err);
+      waveStatus.textContent = '';
+    } finally {
+      if (token === state.loadToken) state.preparing = false;
+    }
+    attachSource(url, token);
+    needsDraw = true;
+  }
+
+  // 16-bit PCM WAV
+  function encodeWav(buffer) {
+    const nc = buffer.numberOfChannels;
+    const len = buffer.length;
+    const sr = buffer.sampleRate;
+    const dataBytes = len * nc * 2;
+    const out = new DataView(new ArrayBuffer(44 + dataBytes));
+    const str = (o, s) => { for (let i = 0; i < s.length; i++) out.setUint8(o + i, s.charCodeAt(i)); };
+    str(0, 'RIFF'); out.setUint32(4, 36 + dataBytes, true); str(8, 'WAVE');
+    str(12, 'fmt '); out.setUint32(16, 16, true); out.setUint16(20, 1, true); out.setUint16(22, nc, true);
+    out.setUint32(24, sr, true); out.setUint32(28, sr * nc * 2, true); out.setUint16(32, nc * 2, true); out.setUint16(34, 16, true);
+    str(36, 'data'); out.setUint32(40, dataBytes, true);
+    const channels = [];
+    for (let c = 0; c < nc; c++) channels.push(buffer.getChannelData(c));
+    let o = 44;
+    for (let i = 0; i < len; i++) {
+      for (let c = 0; c < nc; c++) {
+        const v = Math.max(-1, Math.min(1, channels[c][i]));
+        out.setInt16(o, v < 0 ? v * 0x8000 : v * 0x7fff, true);
+        o += 2;
+      }
+    }
+    return new Blob([out.buffer], { type: 'audio/wav' });
   }
 
   // ---------------------------------------------------------------------------
   // Waveform
   // ---------------------------------------------------------------------------
 
+  async function decodeFile(file, sampleRate) {
+    const data = await file.arrayBuffer();
+    let ctx;
+    try { ctx = new OfflineAudioContext(1, 1, sampleRate); } catch { ctx = new OfflineAudioContext(1, 1, 44100); }
+    return new Promise((resolve, reject) => {
+      const p = ctx.decodeAudioData(data, resolve, reject);
+      if (p && p.catch) p.catch(reject);
+    });
+  }
+
+  function computePeaks(buffer) {
+    const sr = buffer.sampleRate;
+    const channels = [];
+    for (let c = 0; c < buffer.numberOfChannels; c++) channels.push(buffer.getChannelData(c));
+    const len = buffer.length;
+    const bucket = Math.max(1, Math.floor(sr / PEAKS_PER_SEC));
+    const rate = sr / bucket;
+    const n = Math.ceil(len / bucket);
+    const min = new Float32Array(n);
+    const max = new Float32Array(n);
+    const nc = channels.length;
+    let peak = 0;
+    for (let i = 0; i < n; i++) {
+      let lo = 1, hi = -1;
+      const end = Math.min(len, (i + 1) * bucket);
+      for (let j = i * bucket; j < end; j++) {
+        let v = 0;
+        for (let c = 0; c < nc; c++) v += channels[c][j];
+        v /= nc;
+        if (v < lo) lo = v;
+        if (v > hi) hi = v;
+      }
+      min[i] = lo; max[i] = hi;
+      peak = Math.max(peak, -lo, hi);
+    }
+    // Normalise so quiet recordings are still visible
+    if (peak > 0) {
+      const k = 1 / peak;
+      for (let i = 0; i < n; i++) { min[i] *= k; max[i] *= k; }
+    }
+    return { min, max, rate };
+  }
+
   async function buildPeaks(file, token) {
     waveStatus.textContent = 'Analysing audio…';
     try {
-      const data = await file.arrayBuffer();
-      if (token !== state.loadToken) return;
       // Decode at a low sample rate: plenty for a waveform and much lighter on memory.
-      let ctx;
-      try { ctx = new OfflineAudioContext(1, 1, 8000); } catch { ctx = new OfflineAudioContext(1, 1, 44100); }
-      const buffer = await new Promise((resolve, reject) => {
-        const p = ctx.decodeAudioData(data, resolve, reject);
-        if (p && p.catch) p.catch(reject);
-      });
+      const buffer = await decodeFile(file, 8000);
       if (token !== state.loadToken) return;
-
-      const sr = buffer.sampleRate;
-      const channels = [];
-      for (let c = 0; c < buffer.numberOfChannels; c++) channels.push(buffer.getChannelData(c));
-      const len = buffer.length;
-      const bucket = Math.max(1, Math.floor(sr / PEAKS_PER_SEC));
-      const rate = sr / bucket;
-      const n = Math.ceil(len / bucket);
-      const min = new Float32Array(n);
-      const max = new Float32Array(n);
-      const nc = channels.length;
-      let peak = 0;
-      for (let i = 0; i < n; i++) {
-        let lo = 1, hi = -1;
-        const end = Math.min(len, (i + 1) * bucket);
-        for (let j = i * bucket; j < end; j++) {
-          let v = 0;
-          for (let c = 0; c < nc; c++) v += channels[c][j];
-          v /= nc;
-          if (v < lo) lo = v;
-          if (v > hi) hi = v;
-        }
-        min[i] = lo; max[i] = hi;
-        peak = Math.max(peak, -lo, hi);
-      }
-      // Normalise so quiet recordings are still visible
-      if (peak > 0) {
-        const k = 1 / peak;
-        for (let i = 0; i < n; i++) { min[i] *= k; max[i] *= k; }
-      }
-      state.peaks = { min, max, rate };
+      state.peaks = computePeaks(buffer);
       waveStatus.textContent = '';
     } catch (err) {
       if (token !== state.loadToken) return;
@@ -416,7 +498,7 @@
 
   function seek(t) {
     if (!state.file) return;
-    media.currentTime = clamp(t, 0, duration() || 0);
+    media.currentTime = clamp(t, 0, duration() || Infinity);
     needsDraw = true;
   }
 
@@ -434,6 +516,7 @@
 
   function runAction(name) {
     if (!state.file) return;
+    if (state.preparing) { toast('Still preparing audio…'); return; }
     actions[name]();
     const btn = document.querySelector(`.ctrl[data-action="${name}"]`);
     if (btn) {
