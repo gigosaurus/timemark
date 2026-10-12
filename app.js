@@ -57,7 +57,7 @@
     peaks: null,        // { min: Float32Array, max: Float32Array, rate }
     loadToken: 0,
     currentIdx: -1,
-    labels: { tokens: [], ptr: 0 },
+    labels: { tokens: [], ptr: 0, source: null },
     rebinding: null,
     bindings: {},
     settings: { skip: 3, speed: 1, windowSec: 8, volume: 1 },
@@ -543,6 +543,7 @@
   function addMark(time) {
     let label = '';
     let usedLabel = false;
+    syncLabels();
     const L = state.labels;
     if (L.ptr < L.tokens.length) {
       label = L.tokens[L.ptr++];
@@ -733,11 +734,18 @@
   function parseLabels() {
     const text = $('#labelText').value;
     const mode = $('#labelMode').value;
+    state.labels.source = mode + '\n' + text;
     state.labels.tokens = mode === 'lines'
       ? text.split(/\r?\n/).map((s) => s.trim()).filter(Boolean)
       : text.split(/\s+/).filter(Boolean);
     state.labels.ptr = clamp(state.labels.ptr, 0, state.labels.tokens.length);
     renderLabelQueue();
+  }
+
+  // Browsers can refill the text box (e.g. after a reload) without firing an
+  // input event, so re-read it whenever the labels are about to be used.
+  function syncLabels() {
+    if (state.labels.source !== $('#labelMode').value + '\n' + $('#labelText').value) parseLabels();
   }
 
   function renderLabelQueue() {
@@ -753,14 +761,20 @@
   $('#labelPrev').addEventListener('click', () => { state.labels.ptr = Math.max(0, state.labels.ptr - 1); renderLabelQueue(); });
   $('#labelNext').addEventListener('click', () => { state.labels.ptr = Math.min(state.labels.tokens.length, state.labels.ptr + 1); renderLabelQueue(); });
   $('#applyLabels').addEventListener('click', () => {
+    syncLabels();
     const { tokens } = state.labels;
-    if (!tokens.length || !state.marks.length) { toast('Add some text and some marks first'); return; }
-    state.marks.forEach((m, i) => { m.label = tokens[i] || ''; m.usedLabel = false; });
-    state.labels.ptr = Math.min(tokens.length, state.marks.length);
+    if (!tokens.length) { toast('Paste some text into the box first'); return; }
+    if (!state.marks.length) { toast('Add some marks first'); return; }
+    const n = Math.min(tokens.length, state.marks.length);
+    const overwritten = state.marks.slice(0, n).filter((m, i) => m.label && m.label !== tokens[i]).length;
+    if (overwritten && !confirm(`This will replace ${overwritten} existing label${overwritten === 1 ? '' : 's'}. Continue?`)) return;
+    // Marks beyond the end of the text keep whatever label they already have
+    for (let i = 0; i < n; i++) { state.marks[i].label = tokens[i]; state.marks[i].usedLabel = false; }
+    state.labels.ptr = n;
     renderLabelQueue();
     renderMarks();
     saveMarks();
-    toast(`Labelled ${Math.min(tokens.length, state.marks.length)} marks`);
+    toast(`Labelled ${n} mark${n === 1 ? '' : 's'}` + (tokens.length > n ? ` · ${tokens.length - n} ${$('#labelMode').value === 'lines' ? 'lines' : 'words'} left over` : ''));
   });
 
   // ---------------------------------------------------------------------------
@@ -1071,7 +1085,11 @@
   }
   applySettings();
   loadBindings();
-  renderLabelQueue();
+  parseLabels();
+  // Pick up text the browser restores into the box after load / back-forward navigation
+  window.addEventListener('load', syncLabels);
+  window.addEventListener('pageshow', syncLabels);
+  $('#labelDrawer').addEventListener('toggle', syncLabels);
   readColors();
   window.matchMedia('(prefers-color-scheme: dark)').addEventListener?.('change', readColors);
   new ResizeObserver(resizeCanvas).observe(waveWrap);
