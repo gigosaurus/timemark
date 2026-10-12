@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Timemark</title>
+  <meta name="description" content="Mark timestamps in a video or audio file and export them as TXT or JSON.">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%234f6bed'/%3E%3Cpath d='M9 8v16M16 12v12M23 6v18' stroke='white' stroke-width='3' stroke-linecap='round'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <svg viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="7"/><path d="M9 8v16M16 12v12M23 6v18"/></svg>
+      <span>Timemark</span>
+    </div>
+    <div id="fileName" class="file-name" hidden></div>
+    <button id="openBtn" class="btn ghost" type="button">Open file…</button>
+    <input id="fileInput" type="file" accept="audio/*,video/*,.mp3,.wav,.ogg,.oga,.flac,.m4a,.aac,.opus,.mp4,.m4v,.webm,.mov,.mkv" hidden>
+  </header>
+
+  <main id="app">
+    <!-- Empty state -->
+    <section id="dropzone" class="dropzone">
+      <svg viewBox="0 0 48 48" aria-hidden="true"><path d="M24 32V10m0 0-8 8m8-8 8 8M10 30v6a2 2 0 0 0 2 2h24a2 2 0 0 0 2-2v-6"/></svg>
+      <h1>Drop a video or audio file here</h1>
+      <p>or <button id="chooseBtn" class="btn primary" type="button">choose a file</button></p>
+      <p class="muted">Your file never leaves your computer — everything runs in the browser.</p>
+    </section>
+
+    <!-- Workspace -->
+    <section id="workspace" class="workspace" hidden>
+      <div class="player">
+        <div id="stage" class="stage">
+          <video id="media" playsinline preload="auto"></video>
+          <div id="waveWrap" class="wave-wrap" hidden>
+            <canvas id="wave"></canvas>
+            <div id="waveStatus" class="wave-status"></div>
+          </div>
+        </div>
+
+        <div class="timeline">
+          <div id="progress" class="progress" role="slider" aria-label="Seek" tabindex="-1">
+            <div class="progress-fill"></div>
+            <div class="progress-marks"></div>
+            <div class="progress-head"></div>
+          </div>
+          <div class="times"><span id="curTime">0:00.000</span><span class="muted"> / <span id="durTime">0:00.000</span></span></div>
+        </div>
+
+        <div class="controls" id="controls">
+          <button class="btn ctrl" data-action="back" type="button" title="Go back">
+            <svg viewBox="0 0 24 24"><path d="M11 6 5 12l6 6M19 6l-6 6 6 6"/></svg>
+            <span class="lbl">−<span class="skipVal">3</span>s</span><kbd></kbd>
+          </button>
+          <button class="btn ctrl" data-action="play" type="button" title="Play">
+            <svg viewBox="0 0 24 24"><path class="fill" d="M7 5v14l12-7z"/></svg>
+            <span class="lbl">Play</span><kbd></kbd>
+          </button>
+          <button class="btn ctrl" data-action="pause" type="button" title="Pause">
+            <svg viewBox="0 0 24 24"><path class="fill" d="M6 5h4v14H6zM14 5h4v14h-4z"/></svg>
+            <span class="lbl">Pause</span><kbd></kbd>
+          </button>
+          <button class="btn ctrl" data-action="forward" type="button" title="Go forward">
+            <svg viewBox="0 0 24 24"><path d="m13 6 6 6-6 6M5 6l6 6-6 6"/></svg>
+            <span class="lbl">+<span class="skipVal">3</span>s</span><kbd></kbd>
+          </button>
+          <button class="btn ctrl mark" data-action="mark" type="button" title="Mark a timestamp">
+            <svg viewBox="0 0 24 24"><path d="M6 3h12v18l-6-4.5L6 21z"/></svg>
+            <span class="lbl">Mark</span><kbd></kbd>
+          </button>
+          <button class="btn ctrl" data-action="undo" type="button" title="Remove the last mark you added">
+            <svg viewBox="0 0 24 24"><path d="M9 14 4 9l5-5"/><path d="M4 9h10a6 6 0 0 1 0 12h-3"/></svg>
+            <span class="lbl">Undo</span><kbd></kbd>
+          </button>
+        </div>
+
+        <div class="settings">
+          <label>Skip
+            <input id="skipInput" type="number" min="0.1" max="600" step="0.5" value="3"> s
+          </label>
+          <label>Speed
+            <select id="speedSelect">
+              <option value="0.25">0.25×</option>
+              <option value="0.5">0.5×</option>
+              <option value="0.75">0.75×</option>
+              <option value="1" selected>1×</option>
+              <option value="1.25">1.25×</option>
+              <option value="1.5">1.5×</option>
+              <option value="2">2×</option>
+            </select>
+          </label>
+          <label id="zoomLabel" hidden>Window
+            <select id="zoomSelect">
+              <option value="3">3 s</option>
+              <option value="5">5 s</option>
+              <option value="8" selected>8 s</option>
+              <option value="15">15 s</option>
+              <option value="30">30 s</option>
+              <option value="60">60 s</option>
+            </select>
+          </label>
+          <label>Volume
+            <input id="volumeInput" type="range" min="0" max="1" step="0.05" value="1">
+          </label>
+        </div>
+      </div>
+
+      <aside class="panel">
+        <div class="panel-head">
+          <h2>Timestamps <span id="markCount" class="count">0</span></h2>
+          <div class="export">
+            <button id="exportTxt" class="btn" type="button">Download .txt</button>
+            <button id="exportJson" class="btn" type="button">Download .json</button>
+          </div>
+        </div>
+
+        <ol id="markList" class="mark-list"></ol>
+        <p id="emptyMarks" class="empty-marks muted">No timestamps yet. Press <kbd data-kbd="mark"></kbd> or the <b>Mark</b> button while it plays.</p>
+
+        <div class="panel-foot">
+          <button id="clearBtn" class="btn ghost danger" type="button">Clear all</button>
+        </div>
+
+        <details class="drawer" id="labelDrawer">
+          <summary>Auto-label from text <span class="muted">(e.g. lyrics)</span></summary>
+          <p class="muted small">Paste text here and each new mark takes the next word (or line) as its label.</p>
+          <textarea id="labelText" rows="5" placeholder="Paste lyrics or a list of scene names…"></textarea>
+          <div class="row">
+            <label>Split by
+              <select id="labelMode">
+                <option value="words">words</option>
+                <option value="lines">lines</option>
+              </select>
+            </label>
+            <button id="applyLabels" class="btn small" type="button" title="Relabel all existing marks, in time order">Apply to all marks</button>
+          </div>
+          <div class="row next-label">
+            <button id="labelPrev" class="btn small" type="button" aria-label="Previous label">‹</button>
+            <span>Next: <b id="nextLabel">—</b> <span id="labelPos" class="muted"></span></span>
+            <button id="labelNext" class="btn small" type="button" aria-label="Skip label">›</button>
+          </div>
+        </details>
+
+        <details class="drawer" id="keysDrawer">
+          <summary>Keyboard shortcuts</summary>
+          <table class="keys" id="keysTable"></table>
+          <div class="row">
+            <span class="muted small">Click <b>Change</b>, then press a key.</span>
+            <button id="resetKeys" class="btn small" type="button">Reset defaults</button>
+          </div>
+        </details>
+      </aside>
+    </section>
+  </main>
+
+  <div id="dragOverlay" class="drag-overlay" hidden><div>Drop to open</div></div>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
