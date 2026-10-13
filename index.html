@@ -167,6 +167,8 @@
             <button id="exportTxt" class="btn" type="button">Download .txt</button>
             <button id="exportJson" class="btn" type="button">Download .json</button>
           </div>
+          <button id="importBtn" class="btn ghost small import-btn" type="button" title="Load timestamps from a .json or .txt file exported by Timemark">Import .json / .txt…</button>
+          <input id="importInput" type="file" accept=".json,.txt,application/json,text/plain" hidden>
         </div>
 
         <ol id="markList" class="mark-list"></ol>
@@ -207,6 +209,18 @@
       </aside>
     </section>
   </main>
+
+  <dialog id="importDialog" class="dialog">
+    <form method="dialog">
+      <h3>Import timestamps</h3>
+      <p id="importSummary"></p>
+      <div class="dialog-actions">
+        <button class="btn" value="cancel" type="submit">Cancel</button>
+        <button class="btn" value="merge" type="submit">Add to existing</button>
+        <button class="btn primary" value="replace" type="submit">Replace existing</button>
+      </div>
+    </form>
+  </dialog>
 
   <div id="dragOverlay" class="drag-overlay" hidden><div>Drop to open</div></div>
   <div id="toast" class="toast" role="status" aria-live="polite"></div>

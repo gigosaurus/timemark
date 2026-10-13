@@ -166,7 +166,7 @@
     toastEl.textContent = msg;
     toastEl.classList.add('show');
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => toastEl.classList.remove('show'), 1400);
+    toastTimer = setTimeout(() => toastEl.classList.remove('show'), Math.max(1400, msg.length * 45));
   }
 
   function isTypingTarget(el) {
@@ -1164,6 +1164,119 @@
   });
 
   // ---------------------------------------------------------------------------
+  // Import
+  // ---------------------------------------------------------------------------
+
+  // Reads Timemark's own JSON export, a bare array (of seconds or of objects),
+  // or the TXT export ("HH:MM:SS.mmm<tab>label" per line).
+  // Returns { marks: [{ time, label }], tempo: sections | null, file, skipped }.
+  function parseImport(text) {
+    const trimmed = text.trim();
+    let marks = [];
+    let tempo = null;
+    let file = null;
+    let skipped = 0;
+    const toTime = (v) => (typeof v === 'number' ? v : typeof v === 'string' ? parseTime(v) : NaN);
+
+    if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+      const data = JSON.parse(trimmed);
+      const list = Array.isArray(data) ? data : data.timestamps || data.marks;
+      if (!Array.isArray(list)) throw new Error('No "timestamps" list found in this file');
+      for (const item of list) {
+        const obj = item && typeof item === 'object' ? item : { time: item };
+        let t = toTime(obj.time);
+        if (!Number.isFinite(t)) t = toTime(obj.timecode);
+        if (!Number.isFinite(t) || t < 0) { skipped++; continue; }
+        marks.push({ time: t, label: obj.label == null ? '' : String(obj.label) });
+      }
+      if (!Array.isArray(data)) {
+        if (Array.isArray(data.tempo)) tempo = T.normalize(data.tempo);
+        if (typeof data.file === 'string') file = data.file;
+      }
+    } else {
+      for (const line of trimmed.split(/\r?\n/)) {
+        if (!line.trim()) continue;
+        const [timePart, ...rest] = line.split('\t');
+        const t = parseTime(timePart);
+        if (!Number.isFinite(t) || t < 0) { skipped++; continue; }
+        marks.push({ time: t, label: rest.join('\t').trim() });
+      }
+    }
+    marks.sort((a, b) => a.time - b.time);
+    return { marks, tempo: tempo && tempo.length ? tempo : null, file, skipped };
+  }
+
+  function chooseImportMode(summary) {
+    const dialog = $('#importDialog');
+    $('#importSummary').textContent = summary;
+    return new Promise((resolve) => {
+      dialog.addEventListener('close', () => resolve(dialog.returnValue || 'cancel'), { once: true });
+      dialog.returnValue = '';
+      dialog.showModal();
+    });
+  }
+
+  async function importFile(file) {
+    let parsed;
+    try {
+      parsed = parseImport(await file.text());
+    } catch (err) {
+      toast(err instanceof SyntaxError ? 'Couldn’t read that file: it isn’t valid JSON' : `Couldn’t read that file: ${err.message}`);
+      return;
+    }
+    const { marks, tempo, skipped } = parsed;
+    if (!marks.length && !tempo) { toast('No timestamps found in that file'); return; }
+
+    let mode = 'replace';
+    const n = state.marks.length;
+    const replacesTempo = tempo && state.tempo.sections.length;
+    if (n || replacesTempo) {
+      const plural = (k, w) => `${k} ${w}${k === 1 ? '' : 's'}`;
+      const parts = [`This file has ${plural(marks.length, 'timestamp')}${tempo ? ' and a tempo map' : ''}.`];
+      if (n) parts.push(`You already have ${plural(n, 'timestamp')}.`);
+      if (replacesTempo) parts.push('The imported tempo map will replace your current one either way.');
+      if (parsed.file && state.file && parsed.file !== state.file.name) parts.push(`It was made for “${parsed.file}”, not “${state.file.name}”.`);
+      mode = await chooseImportMode(parts.join(' '));
+      if (mode === 'cancel') return;
+    }
+
+    pushHistory();
+    const incoming = marks.map((m) => ({ id: state.nextId++, time: m.time, label: m.label, usedLabel: false }));
+    if (mode === 'replace') {
+      state.marks = incoming;
+      state.addStack = [];
+      state.labels.ptr = 0;
+      renderLabelQueue();
+    } else {
+      // Skip exact duplicates of marks that are already there
+      const dup = (m) => state.marks.some((x) => Math.abs(x.time - m.time) < 0.0005 && x.label === m.label);
+      state.marks = state.marks.concat(incoming.filter((m) => !dup(m))).sort((a, b) => a.time - b.time);
+    }
+    if (tempo) {
+      state.tempo.sections = tempo;
+      saveTempo();
+      resetMetronome();
+    }
+    renderBeatPanel();
+    renderMarks();
+    saveMarks();
+
+    const dur = duration();
+    const beyond = dur ? marks.filter((m) => m.time > dur + 0.0005).length : 0;
+    let msg = `Imported ${marks.length} timestamp${marks.length === 1 ? '' : 's'}${tempo ? ' and tempo map' : ''}`;
+    if (skipped) msg += ` · skipped ${skipped} unreadable`;
+    if (beyond) msg += ` · ${beyond} past the end of this file`;
+    toast(msg);
+  }
+
+  $('#importBtn').addEventListener('click', () => $('#importInput').click());
+  $('#importInput').addEventListener('change', (e) => {
+    const f = e.target.files[0];
+    e.target.value = '';
+    if (f) importFile(f);
+  });
+
+  // ---------------------------------------------------------------------------
   // Auto-labels
   // ---------------------------------------------------------------------------
 
@@ -1302,6 +1415,7 @@
     }
     if (e.ctrlKey || e.metaKey || e.altKey) return;
     if (isTypingTarget(e.target)) return;
+    if (document.querySelector('dialog[open]')) return;
     const name = keyMap.get(e.code);
     if (!name || !state.file) return;
     e.preventDefault();
@@ -1561,7 +1675,14 @@
     dragDepth = 0;
     overlay.hidden = true;
     const file = e.dataTransfer.files[0];
-    if (file) loadFile(file);
+    if (!file) return;
+    // A dropped .json/.txt imports timestamps into the open file
+    if (/\.(json|txt)$/i.test(file.name) || /^(application\/json|text\/plain)$/.test(file.type)) {
+      if (state.file) importFile(file);
+      else toast('Open the audio or video file first, then import timestamps');
+      return;
+    }
+    loadFile(file);
   });
 
   // ---------------------------------------------------------------------------

@@ -44,6 +44,7 @@ Each action also has an on-screen button. To rebind a shortcut, open **Keyboard 
 - **Auto-label from text:** paste lyrics or a list of scene names, and each new mark takes the next word or line as its label. **Apply to all marks** relabels your existing marks in time order.
 - In each timestamp's row, **⤓** moves that mark to the current playback time and **✕** deletes it. Click a time to jump to it.
 - Marks are autosaved in your browser (keyed by file name and size), so reopening the same file restores them.
+- **Import .json / .txt:** loads timestamps from a file Timemark exported, or from a plain list such as `[1.5, 3.25]`. You can also drop the file onto the page. If you already have marks, you choose whether to replace them or add to them. A JSON file's tempo map is imported too.
 
 ## Step 2: beat grid and snapping
 
