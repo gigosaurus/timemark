@@ -15,12 +15,17 @@
     forward: { label: 'Go forward',   defaults: ['KeyF', 'ArrowRight'] },
     mark:    { label: 'Mark',         defaults: ['Space'] },
     undo:    { label: 'Undo last mark', defaults: ['KeyZ', 'Backspace'] },
+    tap:     { label: 'Tap tempo (step 2)', defaults: ['KeyT'] },
   };
   const REPEATABLE = new Set(['back', 'forward']);
   const PEAKS_PER_SEC = 400;
   // MP3s up to this size are decoded up front so seeking is exact (see loadFile)
   const MP3_DECODE_LIMIT = 20 * 1024 * 1024;
   const STORE_PREFIX = 'timemark:';
+  // Step 2 shows a waveform under videos too; skip decoding audio from huge files
+  const VIDEO_WAVE_LIMIT = 300 * 1024 * 1024;
+  const HISTORY_LIMIT = 100;
+  const T = window.TimemarkTempo;
 
   // ---------------------------------------------------------------------------
   // Elements
@@ -61,6 +66,15 @@
     rebinding: null,
     bindings: {},
     settings: { skip: 3, speed: 1, windowSec: 8, volume: 1 },
+    step: 1,
+    peaksRequested: false,
+    // Step 2
+    tempo: { sections: [], divisions: [1, 2, 4] },
+    history: [],        // snapshots of { marks, sections } for "Undo change"
+    taps: [],           // media times of the current run of taps
+    tapHistoryPushed: false,
+    dragMark: null,     // { id, time } while dragging a mark on the waveform
+    metronome: false,
   };
 
   // ---------------------------------------------------------------------------
@@ -83,6 +97,20 @@
   };
 
   const fileKey = () => state.file && `marks:${state.file.name}:${state.file.size}`;
+  const tempoKey = () => state.file && `tempo:${state.file.name}:${state.file.size}`;
+
+  function saveTempo() {
+    const key = tempoKey();
+    if (!key) return;
+    store.set(key, { sections: state.tempo.sections, divisions: state.tempo.divisions });
+  }
+
+  function loadTempo() {
+    const saved = store.get(tempoKey(), null);
+    state.tempo.sections = T.normalize(saved && saved.sections);
+    const divs = saved && Array.isArray(saved.divisions) ? saved.divisions.filter((d) => [1, 2, 3, 4, 6, 8].includes(d)) : null;
+    state.tempo.divisions = divs || [1, 2, 4];
+  }
 
   let saveTimer = 0;
   let pendingSave = null;
@@ -184,6 +212,12 @@
     state.marks = [];
     state.addStack = [];
     state.currentIdx = -1;
+    state.peaksRequested = false;
+    state.history = [];
+    state.taps = [];
+    state.dragMark = null;
+    loadTempo();
+    resetMetronome();
 
     // Restore any marks previously saved for this file
     const saved = store.get(fileKey(), []);
@@ -204,6 +238,7 @@
     durTimeEl.textContent = formatTime(0);
 
     renderMarks();
+    renderBeatPanel();
     if (state.marks.length) toast(`Restored ${state.marks.length} saved timestamp${state.marks.length === 1 ? '' : 's'}`);
 
     // Browsers seek MP3s by estimating byte offsets, which for VBR files without a
@@ -228,7 +263,7 @@
       showStage(isAudio);
       durTimeEl.textContent = formatTime(duration());
       renderMarks();
-      if (isAudio && !state.peaks) buildPeaks(file, token);
+      updateWaveVisibility();
       media.playbackRate = state.settings.speed; // some browsers reset this on load
       updatePlayState();
     }, { once: true });
@@ -243,13 +278,27 @@
     state.isAudio = isAudio;
     stage.classList.remove('is-audio', 'is-video');
     stage.classList.add(isAudio ? 'is-audio' : 'is-video');
-    waveWrap.hidden = !isAudio;
-    $('#zoomLabel').hidden = !isAudio;
-    if (isAudio) resizeCanvas();
+    updateWaveVisibility();
+  }
+
+  // Audio always shows the waveform; video shows it in step 2 (for the beat grid)
+  function updateWaveVisibility() {
+    if (!stage.classList.contains('is-audio') && !stage.classList.contains('is-video')) return;
+    const show = state.isAudio || state.step === 2;
+    waveWrap.hidden = !show;
+    $('#zoomLabel').hidden = !show;
+    if (!show) return;
+    resizeCanvas();
+    if (!state.peaks && !state.peaksRequested && !state.preparing) {
+      state.peaksRequested = true;
+      if (state.isAudio || state.file.size <= VIDEO_WAVE_LIMIT) buildPeaks(state.file, state.loadToken);
+      else waveStatus.textContent = 'File too large to draw a waveform; the beat grid still works';
+    }
   }
 
   async function prepareDecodedAudio(file, token) {
     state.preparing = true;
+    state.peaksRequested = true;
     showStage(true);
     waveStatus.textContent = 'Preparing audio…';
     let url = state.objectUrl;
@@ -264,6 +313,7 @@
       if (token !== state.loadToken) return;
       console.warn('MP3 decode failed; falling back to direct playback', err);
       waveStatus.textContent = '';
+      state.peaksRequested = false; // let the normal waveform path try instead
     } finally {
       if (token === state.loadToken) state.preparing = false;
     }
@@ -367,6 +417,7 @@
     colors = {
       wave: v('--wave'), played: v('--wave-played'), grid: v('--grid'), bg: v('--wave-bg'),
       mark: v('--mark'), text: v('--muted'), head: v('--accent'),
+      gridBar: v('--grid-bar'), gridBeat: v('--grid-beat'), gridSub: v('--grid-sub'),
     };
     needsDraw = true;
   }
@@ -412,7 +463,9 @@
       ctx.fillRect(x, 0, W - x, waveH);
     }
 
-    // Second ticks
+    const showGrid = state.step === 2 && state.tempo.sections.length > 0;
+
+    // Second ticks (just the labels when the beat grid is drawn)
     const step = win <= 5 ? 0.5 : win <= 15 ? 1 : win <= 30 ? 2 : 5;
     ctx.font = `${11 * dpr}px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace`;
     ctx.textBaseline = 'middle';
@@ -420,8 +473,10 @@
     for (let t = Math.ceil(Math.max(0, start) / step) * step; t <= start + win; t += step) {
       if (dur && t > dur) break;
       const x = Math.round((t - start) * pxPerSec);
-      ctx.fillStyle = colors.grid;
-      ctx.fillRect(x, 0, Math.max(1, dpr), waveH);
+      if (!showGrid) {
+        ctx.fillStyle = colors.grid;
+        ctx.fillRect(x, 0, Math.max(1, dpr), waveH);
+      }
       ctx.fillStyle = colors.text;
       const label = formatTime(t).replace(/\.?0+$/, '').replace(/\.$/, '');
       ctx.fillText(label, x, waveH + axisH / 2);
@@ -455,18 +510,72 @@
       ctx.fillRect(0, mid, W, Math.max(1, dpr));
     }
 
+    // Beat grid
+    if (showGrid) {
+      const lines = T.gridLines(state.tempo.sections, Math.max(0, start), dur ? Math.min(dur, start + win) : start + win, state.tempo.divisions);
+      // Leave out subdivisions that would be too dense to read
+      let minGap = Infinity;
+      for (let i = 1; i < lines.length; i++) minGap = Math.min(minGap, lines[i].time - lines[i - 1].time);
+      const drawSubs = minGap * pxPerSec >= 4 * dpr;
+      ctx.font = `600 ${10 * dpr}px system-ui, sans-serif`;
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'bottom';
+      for (const line of lines) {
+        if (line.level === 2 && !drawSubs) continue;
+        const x = Math.round((line.time - start) * pxPerSec);
+        ctx.fillStyle = line.level === 0 ? colors.gridBar : line.level === 1 ? colors.gridBeat : colors.gridSub;
+        ctx.fillRect(x, 0, Math.max(1, line.level === 0 ? 2 * dpr : dpr), waveH);
+        if (line.level === 0 && line.bar != null) {
+          ctx.fillStyle = colors.text;
+          ctx.fillText(String(line.bar), x + 3 * dpr, waveH - 2 * dpr);
+        }
+      }
+    }
+
     // Marks
     ctx.textAlign = 'left';
     ctx.textBaseline = 'top';
     ctx.font = `600 ${11 * dpr}px system-ui, sans-serif`;
-    const marks = state.marks;
+    const drag = state.dragMark;
+    const marks = drag
+      ? state.marks.map((m) => (m.id === drag.id ? { ...m, time: drag.time } : m)).sort((a, b) => a.time - b.time)
+      : state.marks;
     const rowEnds = [-Infinity, -Infinity, -Infinity]; // stack overlapping labels into rows
     const tagH = 16 * dpr;
     const first = lowerBound(marks, start);
     const last = lowerBound(marks, start + win + 1e-9);
     const markX = (m) => Math.round((m.time - start) * pxPerSec);
+    // Where each mark would snap to (step 2)
+    if (showGrid && state.tempo.divisions.length) {
+      ctx.strokeStyle = colors.mark;
+      ctx.lineWidth = Math.max(1, dpr);
+      ctx.setLineDash([4 * dpr, 4 * dpr]);
+      ctx.globalAlpha = 0.8;
+      for (let i = first; i < last; i++) {
+        if (drag && marks[i].id === drag.id) continue;
+        const target = T.snap(state.tempo.sections, marks[i].time, state.tempo.divisions);
+        if (Math.abs(target - marks[i].time) < 0.0005) continue;
+        const tx = Math.round((target - start) * pxPerSec) + 0.5;
+        ctx.beginPath();
+        ctx.moveTo(tx, 18 * dpr);
+        ctx.lineTo(tx, waveH);
+        ctx.stroke();
+        // connector from the mark to its snap point
+        const y = waveH - 10 * dpr;
+        ctx.beginPath();
+        ctx.moveTo(markX(marks[i]), y);
+        ctx.lineTo(tx, y);
+        ctx.stroke();
+      }
+      ctx.setLineDash([]);
+      ctx.globalAlpha = 1;
+    }
+
     ctx.fillStyle = colors.mark;
-    for (let i = first; i < last; i++) ctx.fillRect(markX(marks[i]) - dpr, 0, 2 * dpr, waveH);
+    for (let i = first; i < last; i++) {
+      const w = drag && marks[i].id === drag.id ? 3 * dpr : 2 * dpr;
+      ctx.fillRect(markX(marks[i]) - w / 2, 0, w, waveH);
+    }
     for (let i = first; i < last; i++) {
       const x = markX(marks[i]);
       const text = marks[i].label || String(i + 1);
@@ -512,6 +621,7 @@
     forward() { seek(media.currentTime + state.settings.skip); },
     mark() { addMark(media.currentTime); },
     undo() { undoMark(); },
+    tap() { tapTempo(); },
   };
 
   function runAction(name) {
@@ -593,10 +703,13 @@
         <span class="idx">${i + 1}</span>
         <button class="time" type="button" title="Jump here"></button>
         <input class="label" type="text" placeholder="Label" aria-label="Label">
+        <button class="icon snap" type="button" title="Snap this mark to the beat grid">♩</button>
         <button class="icon set" type="button" title="Move this mark to the current time">⤓</button>
-        <button class="icon del" type="button" title="Delete">✕</button>`;
+        <button class="icon del" type="button" title="Delete">✕</button>
+        <span class="beatpos"></span>`;
       li.querySelector('.time').textContent = formatTime(m.time);
       li.querySelector('.label').value = m.label;
+      li.querySelector('.beatpos').textContent = beatPosText(m.time);
       frag.appendChild(li);
     });
     markList.replaceChildren(frag);
@@ -604,6 +717,7 @@
     $('#emptyMarks').hidden = state.marks.length > 0;
 
     progressMarks.replaceChildren(...buildProgressMarks());
+    updateSnapPreview();
 
     state.currentIdx = -2; // force refresh of highlight
     updateCurrentMark();
@@ -648,8 +762,18 @@
     if (e.target.closest('.time')) {
       seek(mark.time);
     } else if (e.target.closest('.del')) {
+      if (state.step === 2) pushHistory();
       removeMark(id);
+    } else if (e.target.closest('.snap')) {
+      if (!state.tempo.sections.length) { toast('Set a tempo first'); return; }
+      if (!state.tempo.divisions.length) { toast('Choose what to snap to first'); return; }
+      const target = T.snap(state.tempo.sections, mark.time, state.tempo.divisions);
+      if (Math.abs(target - mark.time) < 0.0005) { toast('Already on the grid'); return; }
+      pushHistory();
+      moveMark(id, target);
+      toast(`Snapped to ${formatTime(target)}`);
     } else if (e.target.closest('.set')) {
+      if (state.step === 2) pushHistory();
       const { label } = mark;
       removeMark(id);
       const t = media.currentTime;
@@ -660,6 +784,25 @@
       toast(`Moved to ${formatTime(t)}`);
     }
   });
+
+  // Move a mark to a new time, keeping the list sorted
+  function moveMark(id, time) {
+    const i = state.marks.findIndex((m) => m.id === id);
+    if (i < 0) return;
+    const [m] = state.marks.splice(i, 1);
+    m.time = Math.max(0, time);
+    let j = lowerBound(state.marks, m.time);
+    while (j < state.marks.length && state.marks[j].time === m.time) j++;
+    state.marks.splice(j, 0, m);
+    renderMarks(id);
+    saveMarks();
+  }
+
+  function beatPosText(t) {
+    if (state.step !== 2 || !state.tempo.sections.length) return '';
+    const p = T.position(state.tempo.sections, t);
+    return `bar ${p.bar} · beat ${(Math.round(p.beat * 1000) / 1000).toString()}`;
+  }
 
   markList.addEventListener('input', (e) => {
     if (!e.target.classList.contains('label')) return;
@@ -688,6 +831,292 @@
   });
 
   // ---------------------------------------------------------------------------
+  // Step 2: beat grid & snapping
+  // ---------------------------------------------------------------------------
+
+  function setStep(step) {
+    state.step = step;
+    document.body.classList.toggle('step-2', step === 2);
+    $$('.step').forEach((b) => b.setAttribute('aria-selected', String(Number(b.dataset.step) === step)));
+    $('#beatPanel').hidden = step !== 2;
+    if (step !== 2) resetMetronome();
+    updateWaveVisibility();
+    renderBeatPanel();
+    renderMarks();
+  }
+
+  $$('.step').forEach((b) => b.addEventListener('click', () => setStep(Number(b.dataset.step))));
+
+  // "Undo change" covers everything done in step 2: snapping, dragging and tempo edits
+  function pushHistory() {
+    state.history.push({
+      marks: state.marks.map((m) => ({ ...m })),
+      sections: state.tempo.sections.map((s) => ({ ...s })),
+    });
+    if (state.history.length > HISTORY_LIMIT) state.history.shift();
+    $('#historyUndo').disabled = false;
+  }
+
+  $('#historyUndo').addEventListener('click', () => {
+    const snap = state.history.pop();
+    $('#historyUndo').disabled = !state.history.length;
+    if (!snap) return;
+    state.marks = snap.marks;
+    state.tempo.sections = snap.sections;
+    state.addStack = state.addStack.filter((id) => state.marks.some((m) => m.id === id));
+    saveMarks();
+    saveTempo();
+    renderBeatPanel();
+    renderMarks();
+    toast('Undone');
+  });
+
+  function setSections(sections) {
+    state.tempo.sections = T.normalize(sections);
+    saveTempo();
+    resetMetronome();
+    renderBeatPanel();
+    renderMarks();
+  }
+
+  // Accepts "1:23.456", "1:02:03.5" or plain seconds
+  function parseTime(str) {
+    const parts = String(str).trim().split(':');
+    if (!parts.length || parts.length > 3 || parts.some((p) => p.trim() === '' || !/^\d*\.?\d*$/.test(p.trim()))) return NaN;
+    return parts.reduce((acc, p) => acc * 60 + parseFloat(p), 0);
+  }
+
+  const round3 = (n) => Math.round(n * 1000) / 1000;
+
+  function renderBeatPanel() {
+    const sections = state.tempo.sections;
+    $('#tempoEmpty').hidden = sections.length > 0;
+    $('#sectionTable').hidden = sections.length === 0;
+    $('#nudgeRow').hidden = sections.length === 0;
+    $('#historyUndo').disabled = !state.history.length;
+    const rows = sections.map((s, i) => {
+      const tr = document.createElement('tr');
+      tr.dataset.index = i;
+      tr.innerHTML = `
+        <td><div class="start-cell">
+          <input class="start" type="text" inputmode="decimal" aria-label="Section start time">
+          <button class="icon set-start" type="button" title="Use the playhead position">⤓</button>
+        </div></td>
+        <td><input class="bpm" type="number" min="1" max="999" step="0.01" aria-label="BPM"></td>
+        <td><input class="bpb" type="number" min="1" max="32" step="1" aria-label="Beats per bar"></td>
+        <td>${i > 0 || sections.length > 1 ? '<button class="icon del-section" type="button" title="Remove this tempo section">✕</button>' : '<button class="icon del-section" type="button" title="Clear the tempo">✕</button>'}</td>`;
+      tr.querySelector('.start').value = formatTime(s.start);
+      tr.querySelector('.bpm').value = String(Math.round(s.bpm * 100) / 100);
+      tr.querySelector('.bpb').value = String(s.beatsPerBar);
+      return tr;
+    });
+    $('#sectionTable tbody').replaceChildren(...rows);
+    $$('#divisions input').forEach((cb) => { cb.checked = state.tempo.divisions.includes(Number(cb.value)); });
+    $('#metronome').checked = state.metronome;
+    needsDraw = true;
+  }
+
+  $('#sectionTable').addEventListener('change', (e) => {
+    const tr = e.target.closest('tr');
+    if (!tr) return;
+    const i = Number(tr.dataset.index);
+    const sections = state.tempo.sections.map((s) => ({ ...s }));
+    const s = sections[i];
+    if (!s) return;
+    if (e.target.classList.contains('start')) {
+      const t = parseTime(e.target.value);
+      if (!Number.isFinite(t)) { toast('Enter a time like 1:23.456'); renderBeatPanel(); return; }
+      s.start = t;
+    } else if (e.target.classList.contains('bpm')) {
+      const v = parseFloat(e.target.value);
+      if (!(v > 0)) { renderBeatPanel(); return; }
+      s.bpm = v;
+    } else if (e.target.classList.contains('bpb')) {
+      const v = Math.round(parseFloat(e.target.value));
+      if (!(v >= 1)) { renderBeatPanel(); return; }
+      s.beatsPerBar = v;
+    } else return;
+    pushHistory();
+    setSections(sections);
+  });
+
+  $('#sectionTable').addEventListener('keydown', (e) => {
+    if (e.target.tagName === 'INPUT' && (e.key === 'Enter' || e.key === 'Escape')) e.target.blur();
+  });
+
+  $('#sectionTable').addEventListener('click', (e) => {
+    const tr = e.target.closest('tr');
+    if (!tr) return;
+    const i = Number(tr.dataset.index);
+    if (e.target.closest('.set-start')) {
+      pushHistory();
+      setSections(state.tempo.sections.map((s, j) => (j === i ? { ...s, start: media.currentTime } : s)));
+    } else if (e.target.closest('.del-section')) {
+      pushHistory();
+      setSections(state.tempo.sections.filter((_, j) => j !== i));
+    }
+  });
+
+  $('#setFirstBeat').addEventListener('click', () => {
+    pushHistory();
+    setSections([{ start: media.currentTime, bpm: 120, beatsPerBar: 4 }]);
+    toast('Beat 1 set at the playhead. Now type the BPM.');
+  });
+
+  $('#addSection').addEventListener('click', () => {
+    const sections = state.tempo.sections;
+    const t = media.currentTime;
+    if (!sections.length) {
+      pushHistory();
+      setSections([{ start: t, bpm: 120, beatsPerBar: 4 }]);
+      toast('Beat 1 set at the playhead. Now type the BPM or tap along.');
+      return;
+    }
+    // Tempo changes happen on a beat, so start at the beat nearest the playhead
+    const at = T.snap(sections, t, [1]);
+    if (sections.some((s) => Math.abs(s.start - at) < 1e-6)) { toast('A tempo section already starts here'); return; }
+    const prev = sections[T.sectionIndexAt(sections, at)];
+    pushHistory();
+    setSections(sections.concat({ start: at, bpm: prev.bpm, beatsPerBar: prev.beatsPerBar }));
+    toast(`Tempo change added at ${formatTime(at)}`);
+  });
+
+  $('#nudgeRow').addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-nudge]');
+    if (!btn) return;
+    const d = parseFloat(btn.dataset.nudge);
+    pushHistory();
+    setSections(state.tempo.sections.map((s) => ({ ...s, start: s.start + d })));
+  });
+
+  // Tap along with the music: taps are taken in media time, so they set both the
+  // tempo and where beat 1 falls. A pause of 2+ seconds starts a new run.
+  function tapTempo() {
+    if (state.step !== 2) { toast('Tap tempo is in step 2 (Beat grid & snap)'); return; }
+    if (media.paused) { toast('Play the track, then tap along on each beat'); return; }
+    const t = media.currentTime;
+    const last = state.taps[state.taps.length - 1];
+    if (last == null || t < last || t - last > 2) {
+      state.taps = [];
+      state.tapHistoryPushed = false;
+    }
+    state.taps.push(t);
+    const n = state.taps.length;
+    const fit = T.fitTaps(state.taps);
+    if (!fit || n < 4) {
+      $('#tapStatus').textContent = '';
+      $('#tempoEmpty').hidden = true;
+      toast(n === 1 ? 'Tap… (first tap = beat 1)' : `Tap… ${n}`);
+      return;
+    }
+    if (!state.tapHistoryPushed) { pushHistory(); state.tapHistoryPushed = true; }
+    // Update the section the first tap falls in, or create the first one
+    const sections = state.tempo.sections.map((s) => ({ ...s }));
+    const bpm = Math.round(fit.bpm * 100) / 100;
+    if (!sections.length) sections.push({ start: fit.start, bpm, beatsPerBar: 4 });
+    else {
+      const i = T.sectionIndexAt(sections, state.taps[0]);
+      sections[i].start = fit.start;
+      sections[i].bpm = bpm;
+    }
+    setSections(sections);
+    $('#tapStatus').textContent = `${bpm} BPM from ${n} taps`;
+    toast(`${bpm} BPM`);
+  }
+
+  $('#tapBtn').addEventListener('mousedown', (e) => e.preventDefault());
+  $('#tapBtn').addEventListener('click', () => runAction('tap'));
+
+  $('#divisions').addEventListener('change', () => {
+    state.tempo.divisions = $$('#divisions input').filter((cb) => cb.checked).map((cb) => Number(cb.value));
+    saveTempo();
+    updateSnapPreview();
+    needsDraw = true;
+  });
+
+  function snapTargets() {
+    const { sections, divisions } = state.tempo;
+    if (!sections.length || !divisions.length) return [];
+    return state.marks
+      .map((m) => ({ m, to: T.snap(sections, m.time, divisions) }))
+      .filter(({ m, to }) => Math.abs(to - m.time) >= 0.0005);
+  }
+
+  function updateSnapPreview() {
+    const el = $('#snapPreview');
+    if (!el) return;
+    const btn = $('#snapAll');
+    if (!state.tempo.sections.length) { el.textContent = 'Set a tempo first'; btn.disabled = true; return; }
+    if (!state.tempo.divisions.length) { el.textContent = 'Choose what to snap to'; btn.disabled = true; return; }
+    const moves = snapTargets();
+    btn.disabled = !moves.length;
+    if (!state.marks.length) { el.textContent = 'No marks yet'; return; }
+    if (!moves.length) { el.textContent = 'All marks are on the grid'; return; }
+    const maxMs = Math.round(Math.max(...moves.map(({ m, to }) => Math.abs(to - m.time))) * 1000);
+    el.textContent = `${moves.length} of ${state.marks.length} mark${state.marks.length === 1 ? '' : 's'} will move (largest move ${maxMs} ms)`;
+  }
+
+  $('#snapAll').addEventListener('click', () => {
+    const moves = snapTargets();
+    if (!moves.length) return;
+    pushHistory();
+    for (const { m, to } of moves) m.time = to;
+    state.marks.sort((a, b) => a.time - b.time);
+    renderMarks();
+    saveMarks();
+    toast(`Snapped ${moves.length} mark${moves.length === 1 ? '' : 's'}`);
+  });
+
+  // Metronome: clicks are scheduled a little ahead on the Web Audio clock,
+  // converted from media time at the current playback rate.
+  let audioCtx = null;
+  const scheduled = new Set();
+  function resetMetronome() { scheduled.clear(); }
+
+  $('#metronome').addEventListener('change', (e) => {
+    state.metronome = e.target.checked;
+    if (state.metronome) {
+      try {
+        audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+        audioCtx.resume();
+      } catch {
+        state.metronome = false;
+        e.target.checked = false;
+        toast('Your browser can’t play the metronome');
+      }
+    }
+    resetMetronome();
+  });
+
+  function click(when, accent) {
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.frequency.value = accent ? 1600 : 1000;
+    gain.gain.setValueAtTime(0.0001, when);
+    gain.gain.exponentialRampToValueAtTime(accent ? 0.5 : 0.3, when + 0.002);
+    gain.gain.exponentialRampToValueAtTime(0.0001, when + 0.05);
+    osc.connect(gain).connect(audioCtx.destination);
+    osc.start(when);
+    osc.stop(when + 0.06);
+  }
+
+  function scheduleMetronome() {
+    if (!state.metronome || !audioCtx || state.step !== 2 || media.paused || !state.tempo.sections.length) return;
+    const t = media.currentTime;
+    const rate = media.playbackRate || 1;
+    const ahead = 0.15 * rate;
+    for (const line of T.gridLines(state.tempo.sections, t, t + ahead, [])) {
+      const key = Math.round(line.time * 1000);
+      if (scheduled.has(key)) continue;
+      scheduled.add(key);
+      click(audioCtx.currentTime + Math.max(0, (line.time - t) / rate), line.level === 0);
+    }
+    for (const key of scheduled) if (key < (t - 1) * 1000) scheduled.delete(key);
+  }
+  media.addEventListener('seeking', resetMetronome);
+  media.addEventListener('pause', resetMetronome);
+
+  // ---------------------------------------------------------------------------
   // Export
   // ---------------------------------------------------------------------------
 
@@ -714,16 +1143,23 @@
 
   $('#exportJson').addEventListener('click', () => {
     if (!state.marks.length) { toast('No timestamps to export yet'); return; }
+    const sections = state.tempo.sections;
     const out = {
       file: state.file ? state.file.name : null,
-      duration: Math.round(duration() * 1000) / 1000,
-      timestamps: state.marks.map((m, i) => ({
-        index: i + 1,
-        time: Math.round(m.time * 1000) / 1000,
-        timecode: formatTime(m.time, true),
-        label: m.label,
-      })),
+      duration: round3(duration()),
+      timestamps: state.marks.map((m, i) => {
+        const row = { index: i + 1, time: round3(m.time), timecode: formatTime(m.time, true), label: m.label };
+        if (sections.length) {
+          const p = T.position(sections, m.time);
+          row.bar = p.bar;
+          row.beat = round3(p.beat);
+        }
+        return row;
+      }),
     };
+    if (sections.length) {
+      out.tempo = sections.map((s) => ({ start: round3(s.start), bpm: s.bpm, beatsPerBar: s.beatsPerBar }));
+    }
     download(baseName() + '.json', JSON.stringify(out, null, 2) + '\n', 'application/json');
   });
 
@@ -899,10 +1335,14 @@
   progress.addEventListener('pointerdown', releaseTextFocus);
   waveCanvas.addEventListener('pointerdown', releaseTextFocus);
 
-  // Shortcuts are ignored while typing; say so, and let Esc get out of the box
+  // Shortcuts are ignored while typing; say so (checked every frame, because
+  // focus can also be lost by re-rendering, which fires no event), and let Esc
+  // get out of the box
   const typingHint = $('#typingHint');
-  document.addEventListener('focusin', () => { typingHint.hidden = !isTypingTarget(document.activeElement); });
-  document.addEventListener('focusout', () => { setTimeout(() => { typingHint.hidden = !isTypingTarget(document.activeElement); }); });
+  function updateTypingHint() {
+    const typing = isTypingTarget(document.activeElement);
+    if (typingHint.hidden === typing) typingHint.hidden = !typing;
+  }
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && isTypingTarget(e.target)) e.target.blur();
   });
@@ -986,32 +1426,81 @@
     return clamp((e.clientX - r.left) / r.width, 0, 1) * duration();
   });
 
-  // Waveform: click to jump to that point; drag to scrub like a tape
+  // Waveform: click to jump to that point; drag to scrub like a tape.
+  // In step 2, dragging a mark moves it (snapping to the grid unless Shift is held).
   (() => {
     let drag = null;
+    const timeAtX = (clientX) => {
+      const r = waveCanvas.getBoundingClientRect();
+      const { start, win } = waveWindow();
+      return start + ((clientX - r.left) / r.width) * win;
+    };
+    // The mark under the pointer (within a few pixels), if any
+    const markAt = (clientX) => {
+      if (state.step !== 2 || !state.marks.length) return null;
+      const r = waveCanvas.getBoundingClientRect();
+      const t = timeAtX(clientX);
+      const tolerance = (6 / r.width) * state.settings.windowSec;
+      const i = lowerBound(state.marks, t);
+      let best = null, bestD = tolerance;
+      for (const j of [i - 1, i]) {
+        const m = state.marks[j];
+        if (m && Math.abs(m.time - t) <= bestD) { best = m; bestD = Math.abs(m.time - t); }
+      }
+      return best;
+    };
+    const dragTime = (e) => {
+      const t = Math.max(0, timeAtX(e.clientX));
+      const { sections, divisions } = state.tempo;
+      return e.shiftKey || !sections.length || !divisions.length ? t : T.snap(sections, t, divisions);
+    };
+
     waveCanvas.addEventListener('pointerdown', (e) => {
       if (!state.file || e.button !== 0) return;
       waveCanvas.setPointerCapture(e.pointerId);
-      drag = { x: e.clientX, t: media.currentTime, moved: false };
+      const hit = markAt(e.clientX);
+      if (hit) {
+        drag = { mark: hit, x: e.clientX, moved: false };
+        state.dragMark = { id: hit.id, time: hit.time };
+      } else {
+        drag = { x: e.clientX, t: media.currentTime, moved: false };
+      }
+      needsDraw = true;
     });
     waveCanvas.addEventListener('pointermove', (e) => {
-      if (!drag) return;
+      if (!drag) {
+        waveWrap.classList.toggle('grab', !!markAt(e.clientX));
+        return;
+      }
       const dx = e.clientX - drag.x;
       if (Math.abs(dx) > 3) drag.moved = true;
-      if (drag.moved) {
+      if (!drag.moved) return;
+      if (drag.mark) {
+        state.dragMark.time = dragTime(e);
+        needsDraw = true;
+      } else {
         const w = waveCanvas.getBoundingClientRect().width;
         seek(drag.t - (dx / w) * state.settings.windowSec);
       }
     });
     waveCanvas.addEventListener('pointerup', (e) => {
-      if (drag && !drag.moved) {
-        const r = waveCanvas.getBoundingClientRect();
-        const { start, win } = waveWindow();
-        seek(start + ((e.clientX - r.left) / r.width) * win);
+      if (drag && drag.mark) {
+        const to = state.dragMark.time;
+        state.dragMark = null;
+        if (drag.moved && Math.abs(to - drag.mark.time) >= 0.0005) {
+          pushHistory();
+          moveMark(drag.mark.id, to);
+        } else if (!drag.moved) {
+          seek(drag.mark.time);
+        }
+        needsDraw = true;
+      } else if (drag && !drag.moved) {
+        seek(timeAtX(e.clientX));
       }
       drag = null;
     });
-    waveCanvas.addEventListener('pointercancel', () => { drag = null; });
+    waveCanvas.addEventListener('pointercancel', () => { drag = null; state.dragMark = null; needsDraw = true; });
+    waveCanvas.addEventListener('pointerleave', () => { if (!drag) waveWrap.classList.remove('grab'); });
   })();
 
   // ---------------------------------------------------------------------------
@@ -1022,6 +1511,7 @@
   let lastTime = -1;
 
   function frame() {
+    updateTypingHint();
     if (state.file) {
       const t = media.currentTime;
       if (t !== lastTime || needsDraw) {
@@ -1032,9 +1522,10 @@
         progressHead.style.left = `${pct}%`;
         progress.setAttribute('aria-valuenow', t.toFixed(3));
         updateCurrentMark();
-        if (state.isAudio && !waveWrap.hidden) drawWave();
+        if (!waveWrap.hidden) drawWave();
         needsDraw = false;
       }
+      scheduleMetronome();
     }
     requestAnimationFrame(frame);
   }
@@ -1085,6 +1576,7 @@
   }
   applySettings();
   loadBindings();
+  setStep(1);
   parseLabels();
   // Pick up text the browser restores into the box after load / back-forward navigation
   window.addEventListener('load', syncLabels);

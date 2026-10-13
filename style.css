@@ -14,6 +14,9 @@
   --wave-played: #4f6bed;
   --wave-bg: #fafbfc;
   --grid: #e3e6ec;
+  --grid-bar: rgba(28, 31, 38, 0.55);
+  --grid-beat: rgba(28, 31, 38, 0.25);
+  --grid-sub: rgba(28, 31, 38, 0.1);
   --radius: 10px;
   --shadow: 0 1px 2px rgba(0, 0, 0, 0.06), 0 2px 8px rgba(0, 0, 0, 0.04);
   color-scheme: light;
@@ -36,6 +39,9 @@
     --wave-played: #7088ff;
     --wave-bg: #15181e;
     --grid: #232731;
+    --grid-bar: rgba(230, 232, 238, 0.55);
+    --grid-beat: rgba(230, 232, 238, 0.25);
+    --grid-sub: rgba(230, 232, 238, 0.1);
     --shadow: none;
     color-scheme: dark;
   }
@@ -169,6 +175,85 @@ video { display: block; width: 100%; max-height: 62vh; background: #000; }
 }
 .wave-status:empty { display: none; }
 
+/* ---------- Steps ---------- */
+.steps {
+  display: flex;
+  gap: 4px;
+  padding: 3px;
+  border-radius: 10px;
+  background: var(--surface-2);
+  align-self: flex-start;
+}
+.step {
+  font: inherit;
+  font-size: 14px;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  padding: 6px 14px;
+  border-radius: 7px;
+  cursor: pointer;
+}
+.step b {
+  display: inline-grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  margin-right: 4px;
+  border-radius: 50%;
+  font-size: 11px;
+  background: var(--border);
+  color: var(--text);
+}
+.step[aria-selected="true"] { background: var(--surface); color: var(--text); box-shadow: var(--shadow); font-weight: 600; }
+.step[aria-selected="true"] b { background: var(--accent); color: var(--accent-text); }
+.step:focus-visible { outline: 2px solid var(--accent); }
+
+/* Step 2 shows the waveform under a video, at a smaller height */
+body.step-2 .stage.is-video video { max-height: 40vh; }
+.stage.is-video .wave-wrap { height: 150px; border-top: 1px solid var(--border); }
+.wave-wrap.grab { cursor: ew-resize; }
+
+/* ---------- Beat panel ---------- */
+.beat-panel {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+.beat-block { padding: 12px 14px; }
+.beat-block + .beat-block { border-top: 1px solid var(--border); }
+.beat-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
+.beat-head h3 { margin: 0; font-size: 15px; }
+.beat-tools { display: flex; gap: 6px; flex-wrap: wrap; }
+.beat-block p { margin: 6px 0 0; }
+.link { font: inherit; background: none; border: 0; padding: 0; color: var(--accent); cursor: pointer; text-decoration: underline; }
+
+.sections { width: 100%; border-collapse: collapse; font-size: 14px; }
+.sections th { text-align: left; font-weight: 500; color: var(--muted); font-size: 12px; padding: 0 6px 4px 0; }
+.sections td { padding: 3px 6px 3px 0; }
+.sections input { font: inherit; font-size: 14px; color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 4px 6px; }
+.sections .start-cell { display: flex; gap: 4px; align-items: center; }
+.sections input.start { width: 110px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; }
+.sections input.bpm { width: 84px; }
+.sections input.bpb { width: 56px; }
+.sections .icon { width: 28px; height: 28px; padding: 0; border: 0; background: none; color: var(--muted); cursor: pointer; border-radius: 4px; }
+.sections .icon:hover { background: var(--surface-2); color: var(--text); }
+.nudge { flex-wrap: wrap; }
+
+.divisions { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 14px; }
+.divisions label, .metro { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+.metro { margin-top: 10px; font-size: 14px; }
+input[type="checkbox"] { accent-color: var(--accent); }
+.snap-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+
+/* Per-mark snap button only in step 2 */
+.mark-list .icon.snap { display: none; }
+body.step-2 .mark-list li { grid-template-columns: 34px auto minmax(0, 1fr) auto auto auto; }
+body.step-2 .mark-list .icon.snap { display: inline-block; }
+.mark-list .beatpos { display: none; }
+body.step-2 .mark-list .beatpos { display: block; grid-column: 3 / -1; font-size: 11px; color: var(--muted); padding: 0 6px; margin-top: -4px; }
+
 /* ---------- Timeline ---------- */
 .timeline { display: flex; align-items: center; gap: 12px; }
 .progress {
@@ -208,12 +293,23 @@ video { display: block; width: 100%; max-height: 62vh; background: #000; }
 .ctrl.flash { background: color-mix(in srgb, var(--mark) 30%, var(--surface)); transition: none; }
 
 .typing-hint {
+  /* Floats so showing/hiding it never shifts the layout under the pointer */
+  position: fixed;
+  left: 50%;
+  bottom: 70px;
+  transform: translateX(-50%);
+  z-index: 15;
+  width: max-content;
+  max-width: calc(100% - 32px);
   margin: 0;
-  padding: 6px 10px;
+  padding: 6px 12px;
   border-radius: 8px;
-  font-size: 14px;
-  background: var(--accent-soft);
+  font-size: 13px;
+  background: var(--surface);
+  border: 1px solid var(--accent);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
   color: var(--text);
+  pointer-events: none;
 }
 .settings { display: flex; flex-wrap: wrap; gap: 8px 20px; align-items: center; color: var(--muted); font-size: 14px; }
 .settings label { display: inline-flex; align-items: center; gap: 6px; }

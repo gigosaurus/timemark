@@ -31,6 +31,11 @@
     <!-- Workspace -->
     <section id="workspace" class="workspace" hidden>
       <div class="player">
+        <div class="steps" role="tablist" aria-label="Steps">
+          <button class="step" data-step="1" role="tab" type="button" aria-selected="true"><b>1</b> Mark</button>
+          <button class="step" data-step="2" role="tab" type="button" aria-selected="false"><b>2</b> Beat grid &amp; snap</button>
+        </div>
+
         <div id="stage" class="stage">
           <video id="media" playsinline preload="auto"></video>
           <div id="waveWrap" class="wave-wrap" hidden>
@@ -106,6 +111,53 @@
             <input id="volumeInput" type="range" min="0" max="1" step="0.05" value="1">
           </label>
         </div>
+
+        <!-- Step 2: tempo map and snapping -->
+        <div id="beatPanel" class="beat-panel" hidden>
+          <section class="beat-block">
+            <div class="beat-head">
+              <h3>Tempo</h3>
+              <div class="beat-tools">
+                <button id="tapBtn" class="btn small" type="button" title="Tap along on each beat while it plays, starting on beat 1 of a bar">Tap tempo <kbd data-kbd="tap"></kbd></button>
+                <button id="addSection" class="btn small" type="button" title="Start a new tempo section at the beat nearest the playhead">+ Tempo change at playhead</button>
+              </div>
+            </div>
+            <p id="tempoEmpty" class="muted small">No tempo yet. Play the track and tap <kbd data-kbd="tap"></kbd> on each beat, starting on beat 1 of a bar. Or <button id="setFirstBeat" class="link" type="button">set beat 1 at the playhead</button> and type the BPM.</p>
+            <table id="sectionTable" class="sections" hidden>
+              <thead><tr><th>Starts (beat 1)</th><th>BPM</th><th>Beats / bar</th><th></th></tr></thead>
+              <tbody></tbody>
+            </table>
+            <div class="row nudge" id="nudgeRow" hidden>
+              <span class="muted small" id="tapStatus"></span>
+              <span>Shift grid
+                <button class="btn small" type="button" data-nudge="-0.01" title="Move the whole grid 10 ms earlier">−10 ms</button>
+                <button class="btn small" type="button" data-nudge="0.01" title="Move the whole grid 10 ms later">+10 ms</button>
+              </span>
+            </div>
+          </section>
+
+          <section class="beat-block">
+            <div class="beat-head"><h3>Snap to</h3></div>
+            <div class="divisions" id="divisions">
+              <label><input type="checkbox" value="1"> Beat</label>
+              <label><input type="checkbox" value="2"> ½ beat <span class="muted">(8ths)</span></label>
+              <label><input type="checkbox" value="4"> ¼ beat <span class="muted">(16ths)</span></label>
+              <label><input type="checkbox" value="8"> ⅛ beat <span class="muted">(32nds)</span></label>
+              <label><input type="checkbox" value="3"> ⅓ beat <span class="muted">(8th triplets)</span></label>
+              <label><input type="checkbox" value="6"> ⅙ beat <span class="muted">(16th triplets)</span></label>
+            </div>
+            <label class="metro"><input type="checkbox" id="metronome"> Metronome click while playing</label>
+          </section>
+
+          <section class="beat-block">
+            <div class="snap-actions">
+              <button id="snapAll" class="btn primary" type="button">Snap all marks</button>
+              <button id="historyUndo" class="btn" type="button" disabled>Undo change</button>
+              <span id="snapPreview" class="muted small"></span>
+            </div>
+            <p class="muted small">Dashed lines on the waveform show where each mark would snap to. Drag a mark on the waveform to move it; it snaps to the grid as you drag. Hold <kbd>Shift</kbd> to move it freely.</p>
+          </section>
+        </div>
       </div>
 
       <aside class="panel">
@@ -159,6 +211,7 @@
   <div id="dragOverlay" class="drag-overlay" hidden><div>Drop to open</div></div>
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
+  <script src="tempo.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
