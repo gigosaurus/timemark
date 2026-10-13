@@ -85,6 +85,10 @@ In step 2, video files also show a waveform under the video, so the grid has som
 
 `time` is in seconds, with millisecond precision. `bar`, `beat` and `tempo` appear only once a tempo has been set. `beat` is 1-based within the bar, so 2.5 means halfway between beats 2 and 3.
 
+## Updating
+
+`index.html` loads `style.css`, `tempo.js` and `app.js` with a `?v=` version number. When you change any of them, increase that number, all three in step. Otherwise browsers can keep using cached old copies alongside the new page.
+
 ## Tests
 
 The tempo maths (snapping, grid lines, bar/beat positions, tap fitting) lives in `tempo.js` and has unit tests:
